@@ -132,6 +132,17 @@ vim.keymap.set('n', '<leader>S', [[:%s/\<<C-r><C-w>\>/<C-r><C-w>/gI<Left><Left><
 vim.keymap.set('n', '<leader>_', '<cmd>cnext<CR>zz', { desc = 'Forward qfixlist' })
 vim.keymap.set('n', '<leader>;', '<cmd>cprev<CR>zz', { desc = 'Backward qfixlist' })
 
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'qf',
+  callback = function()
+    vim.keymap.set('n', 'dd', function()
+      local qf = vim.fn.getqflist()
+      table.remove(qf, vim.fn.line '.')
+      vim.fn.setqflist(qf, 'r')
+    end, { buffer = true })
+  end,
+})
+
 -- Diagnostic keymaps
 vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, { desc = 'Go to previous [D]iagnostic message' })
 vim.keymap.set('n', ']d', vim.diagnostic.goto_next, { desc = 'Go to next [D]iagnostic message' })
@@ -503,6 +514,30 @@ require('lazy').setup({
           -- or a suggestion from your LSP for this to activate.
           map('gra', vim.lsp.buf.code_action, '[G]oto Code [A]ction', { 'n', 'x' })
 
+          -- gopls: struct tags without going through the code action menu.
+          -- gopls only offers these inside the struct body, so in normal mode we widen
+          -- the request to the enclosing struct -- lets the cursor sit on the type name too.
+          local modify_tags = function(kind)
+            return function()
+              local opts = { context = { only = { kind } }, apply = true }
+              if vim.fn.mode() == 'n' then
+                local node = vim.treesitter.get_node()
+                while node and node:type() ~= 'struct_type' and node:type() ~= 'type_spec' do
+                  node = node:parent()
+                end
+                if node and node:type() == 'type_spec' then node = node:field('type')[1] end
+                if node and node:type() == 'struct_type' then
+                  local sr, sc, er, ec = node:range()
+                  -- end col is inclusive here: make_given_range_params adds one back
+                  opts.range = { start = { sr + 1, sc }, ['end'] = { er + 1, math.max(ec - 1, 0) } }
+                end
+              end
+              vim.lsp.buf.code_action(opts)
+            end
+          end
+          map('grj', modify_tags 'refactor.rewrite.addTags', 'Add struct [J]son tags', { 'n', 'x' })
+          map('grJ', modify_tags 'refactor.rewrite.removeTags', 'Remove struct [J]son tags', { 'n', 'x' })
+
           -- WARN: This is not Goto Definition, this is Goto Declaration.
           --  For example, in C this would take you to the header.
           map('grD', vim.lsp.buf.declaration, '[G]oto [D]eclaration')
@@ -552,13 +587,17 @@ require('lazy').setup({
       ---@type table<string, vim.lsp.Config>
       local servers = {
         gopls = {
-          gofumpt = true,
-          analyses = {
-            unusedparams = true,
-            printf = true,
+          settings = {
+            gopls = {
+              gofumpt = true,
+              analyses = {
+                unusedparams = true,
+                printf = true,
+              },
+              staticcheck = true,
+              semanticTokens = true,
+            },
           },
-          staticcheck = true,
-          sementicTokens = true,
         },
         pyright = {},
         -- rust_analyzer = {},
@@ -569,7 +608,18 @@ require('lazy').setup({
         --
         -- But for many setups, the LSP (`ts_ls`) will work just fine
         ts_ls = {},
-        --
+        denols = {}, -- ponytail: lspconfig's root_dir picks denols vs ts_ls via deno.json/deno.lock
+        eslint = {},
+        terraformls = {
+          settings = {
+            terraform = {
+              experimentalFeatures = {
+                prefillRequiredFields = true, -- completing a resource fills in its required args
+                validateOnSave = true,
+              },
+            },
+          },
+        },
 
         -- Special Lua Config, as recommended by neovim help docs
         lua_ls = {
@@ -652,18 +702,14 @@ require('lazy').setup({
     ---@module 'conform'
     ---@type conform.setupOpts
     opts = {
-      notify_on_error = false,
+      notify_on_error = true,
       format_on_save = function(bufnr)
         local disable_filetypes = { c = true, cpp = true }
-        if disable_filetypes[vim.bo[bufnr].filetype] then
-          return nil
-        end
+        if disable_filetypes[vim.bo[bufnr].filetype] then return nil end
 
         local opts = { timeout_ms = 5500, lsp_format = 'fallback' }
 
-        if vim.bo[bufnr].filetype == 'go' and require('neoconf').get('conform.disable_goimports') then
-          opts.formatters = { 'gofmt' }
-        end
+        if vim.bo[bufnr].filetype == 'go' and require('neoconf').get 'conform.disable_goimports' then opts.formatters = { 'gofmt' } end
 
         return opts
       end,
@@ -674,17 +720,24 @@ require('lazy').setup({
         go = { 'gofmt', 'goimports' },
         lua = { 'stylua' },
         python = { 'black' },
-        javascript = { 'prettier' },
+        json = { 'prettier' },
+        jsonc = { 'prettier' },
         sql = { 'pg_format' },
         terraform = { 'terraform_fmt' },
         hcl = { 'terraform_fmt' },
         ['terraform-vars'] = { 'terraform_fmt' },
         --
         -- You can use 'stop_after_first' to run the first available formatter from the list
-        javascript = { 'prettier' },
-        javascriptreact = { 'prettier' },
-        typescript = { 'prettier' },
-        typescriptreact = { 'prettier' },
+        javascript = { 'deno_fmt', 'prettier', stop_after_first = true },
+        javascriptreact = { 'deno_fmt', 'prettier', stop_after_first = true },
+        typescript = { 'deno_fmt', 'prettier', stop_after_first = true },
+        typescriptreact = { 'deno_fmt', 'prettier', stop_after_first = true },
+      },
+      formatters = {
+        -- only in Deno projects; otherwise stop_after_first falls through to prettier
+        deno_fmt = {
+          condition = function(_, ctx) return vim.fs.root(ctx.buf, { 'deno.json', 'deno.jsonc' }) ~= nil end,
+        },
       },
     },
   },
@@ -902,9 +955,7 @@ require('lazy').setup({
       }
 
       vim.api.nvim_create_autocmd('FileType', {
-        callback = function(args)
-          pcall(vim.treesitter.start, args.buf)
-        end,
+        callback = function(args) pcall(vim.treesitter.start, args.buf) end,
       })
     end,
   },
